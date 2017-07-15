@@ -158,7 +158,7 @@ class Ruleset
             $sniffs = $this->expandRulesetReference($restrictions[0], dirname($standardPaths[0]));
         } else {
             foreach ($standardPaths as $standard) {
-                $ruleset = simplexml_load_string(file_get_contents($standard));
+                $ruleset = @simplexml_load_string(file_get_contents($standard));
                 if ($ruleset !== false) {
                     $standardName = (string) $ruleset['name'];
                     if ($this->name !== '') {
@@ -169,7 +169,13 @@ class Ruleset
                     $this->paths[] = $standard;
 
                     // Allow autoloading of custom files inside this standard.
-                    Autoload::addSearchPath(dirname(dirname($standard)));
+                    if (isset($ruleset['namespace']) === true) {
+                        $namespace = (string) $ruleset['namespace'];
+                    } else {
+                        $namespace = basename(dirname($standard));
+                    }
+
+                    Autoload::addSearchPath(dirname($standard), $namespace);
                 }
 
                 if (PHP_CODESNIFFER_VERBOSITY === 1) {
@@ -186,14 +192,14 @@ class Ruleset
         $sniffRestrictions = array();
         foreach ($restrictions as $sniffCode) {
             $parts     = explode('.', strtolower($sniffCode));
-            $sniffName = 'php_codesniffer\standards\\'.$parts[0].'\sniffs\\'.$parts[1].'\\'.$parts[2].'sniff';
+            $sniffName = $parts[0].'\sniffs\\'.$parts[1].'\\'.$parts[2].'sniff';
             $sniffRestrictions[$sniffName] = true;
         }
 
         $sniffExclusions = array();
         foreach ($exclusions as $sniffCode) {
             $parts     = explode('.', strtolower($sniffCode));
-            $sniffName = 'php_codesniffer\standards\\'.$parts[0].'\sniffs\\'.$parts[1].'\\'.$parts[2].'sniff';
+            $sniffName = $parts[0].'\sniffs\\'.$parts[1].'\\'.$parts[2].'sniff';
             $sniffExclusions[$sniffName] = true;
         }
 
@@ -298,7 +304,7 @@ class Ruleset
             echo 'Processing ruleset '.Util\Common::stripBasepath($rulesetPath, $this->config->basepath).PHP_EOL;
         }
 
-        $ruleset = simplexml_load_string(file_get_contents($rulesetPath));
+        $ruleset = @simplexml_load_string(file_get_contents($rulesetPath));
         if ($ruleset === false) {
             throw new RuntimeException("Ruleset $rulesetPath is not valid");
         }
@@ -319,6 +325,29 @@ class Ruleset
 
             $ownSniffs = $this->expandSniffDirectory($sniffDir, $depth);
         }
+
+        // Included custom autoloaders.
+        foreach ($ruleset->{'autoload'} as $autoload) {
+            if ($this->shouldProcessElement($autoload) === false) {
+                continue;
+            }
+
+            $autoloadPath = (string) $autoload;
+            if (is_file($autoloadPath) === false) {
+                $autoloadPath = Util\Common::realPath(dirname($rulesetPath).DIRECTORY_SEPARATOR.$autoloadPath);
+            }
+
+            if ($autoloadPath === false) {
+                throw new RuntimeException('The specified autoload file "'.$autoload.'" does not exist');
+            }
+
+            include $autoloadPath;
+
+            if (PHP_CODESNIFFER_VERBOSITY > 1) {
+                echo str_repeat("\t", $depth);
+                echo "\t=> included autoloader $autoloadPath".PHP_EOL;
+            }
+        }//end foreach
 
         // Process custom sniff config settings.
         foreach ($ruleset->{'config'} as $config) {
@@ -365,14 +394,17 @@ class Ruleset
                         echo "\t\t=> severity set to 5".PHP_EOL;
                     }
                 } else if (empty($newSniffs) === false) {
-                    // Including a sniff that hasn't been included higher up, but
-                    // only including a single message from it. So turn off all messages in
-                    // the sniff, except this one.
-                    $this->ruleset[$sniffCode]['severity']            = 0;
-                    $this->ruleset[(string) $rule['ref']]['severity'] = 5;
-                    if (PHP_CODESNIFFER_VERBOSITY > 1) {
-                        echo str_repeat("\t", $depth);
-                        echo "\t\tExcluding sniff \"".$sniffCode.'" except for "'.$parts[3].'"'.PHP_EOL;
+                    $newSniff = $newSniffs[0];
+                    if (in_array($newSniff, $ownSniffs) === false) {
+                        // Including a sniff that hasn't been included higher up, but
+                        // only including a single message from it. So turn off all messages in
+                        // the sniff, except this one.
+                        $this->ruleset[$sniffCode]['severity']            = 0;
+                        $this->ruleset[(string) $rule['ref']]['severity'] = 5;
+                        if (PHP_CODESNIFFER_VERBOSITY > 1) {
+                            echo str_repeat("\t", $depth);
+                            echo "\t\tExcluding sniff \"".$sniffCode.'" except for "'.$parts[3].'"'.PHP_EOL;
+                        }
                     }
                 }//end if
             }//end if
@@ -1059,12 +1091,13 @@ class Ruleset
                 continue;
             }
 
-            $className = Autoload::loadFile($file);
+            $className   = Autoload::loadFile($file);
+            $compareName = Util\Common::cleanSniffClass($className);
 
             // If they have specified a list of sniffs to restrict to, check
             // to see if this sniff is allowed.
             if (empty($restrictions) === false
-                && isset($restrictions[strtolower($className)]) === false
+                && isset($restrictions[$compareName]) === false
             ) {
                 continue;
             }
@@ -1072,7 +1105,7 @@ class Ruleset
             // If they have specified a list of sniffs to exclude, check
             // to see if this sniff is allowed.
             if (empty($exclusions) === false
-                && isset($exclusions[strtolower($className)]) === true
+                && isset($exclusions[$compareName]) === true
             ) {
                 continue;
             }
